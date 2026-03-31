@@ -1,0 +1,13 @@
+[project]
+name = "PGZ-Decrypt"
+version = "0.1.0"
+description = "POC for PGZ file downloads"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests",
+    "pycryptodome",
+]
+
+[project.scripts]
+PGZ-Decrypt = "main:main"
