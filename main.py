@@ -25,10 +25,11 @@ def fetch_key(session, file_name):
     url = f"{BASE_URL}/drm_serve.php?file={file_name}&action=key"
     resp = session.get(url)
     resp.raise_for_status()
-    return resp.json()["key"]
+    data = resp.json()
+    return data["key"], data["nonce"]
 
-def fetch_encrypted(session, file_name):
-    url = f"{BASE_URL}/drm_serve.php?file={file_name}&action=media"
+def fetch_encrypted(session, file_name, nonce):
+    url = f"{BASE_URL}/drm_serve.php?file={file_name}&action=media&nonce={nonce}"
     resp = session.get(url)
     resp.raise_for_status()
     return resp.content
@@ -67,10 +68,10 @@ def main():
     authenticate(session, file_name, credential, field_name)
 
     print("Fetching key...")
-    key_hex = fetch_key(session, file_name)
+    key_hex, nonce = fetch_key(session, file_name)
 
     print("Fetching encrypted file...")
-    encrypted_data = fetch_encrypted(session, file_name)
+    encrypted_data = fetch_encrypted(session, file_name, nonce)
 
     print("Decrypting...")
     decrypted = decrypt(encrypted_data, key_hex)

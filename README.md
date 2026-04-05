@@ -4,9 +4,14 @@
 
 The ProGrade Zenith (PGZ) file serving platform at `files.radiocitygovernment.com` implements a
 client-side DRM scheme that is trivially bypassable. The encryption key for every protected file
-is served directly to any authenticated browser session via an unauthenticated-by-design API
-endpoint. An attacker who knows the file name and either a file password or a download code can
-download and permanently decrypt any protected file in a single script with no specialised tooling.
+is served directly to any authenticated browser session. An attacker who knows the file name and
+either a file password or a download code can download and permanently decrypt any protected file
+in a single script with no specialised tooling.
+
+A nonce-binding patch has been applied (audit recommendation #2) that enforces sequential
+pairing between the key fetch and media fetch and prevents replay. It does not close the root
+vulnerability — the client still receives both the key and the ciphertext, and the PoC handles
+the nonce transparently.
 
 ---
 
@@ -23,8 +28,8 @@ The two vulnerable endpoints, both accessible with only a valid session cookie:
 
 | Endpoint | Purpose | Returns |
 |---|---|---|
-| `GET /drm_serve.php?file={name}&action=key` | Deliver decryption key | `{"key": "<hex>", "nonce": "<hex>"}` |
-| `GET /drm_serve.php?file={name}&action=media` | Deliver ciphertext | Raw encrypted binary |
+| `GET /drm_serve.php?file={name}&action=key` | Deliver decryption key + single-use nonce | `{"key": "<hex>", "nonce": "<hex>"}` |
+| `GET /drm_serve.php?file={name}&action=media&nonce={nonce}` | Deliver ciphertext | Raw encrypted binary |
 
 Serving the key and the ciphertext to the same party is the fundamental flaw. No DRM scheme is
 secure if the client holds both.
@@ -34,13 +39,19 @@ secure if the client holds both.
 ## Attack Flow
 
 ```
-1. GET  /f/{file}              — Load the access form, scrape pgz_csrf token
-2. POST /f/{file}              — Submit pgz_csrf + credential (see below) → receive PGZ_SESSION cookie
-3. GET  /drm_serve.php?...key  — Receive AES-256 key in plaintext JSON
-4. GET  /drm_serve.php?...media — Receive AES-256-CBC encrypted file
-5. Decrypt locally             — IV = first 16 bytes of ciphertext; remainder is payload
+1. GET  /f/{file}                             — Load the access form, scrape pgz_csrf token
+2. POST /f/{file}                             — Submit pgz_csrf + credential → receive PGZ_SESSION cookie
+3. GET  /drm_serve.php?...&action=key         — Receive {"key": "<hex>", "nonce": "<hex>"}
+4. GET  /drm_serve.php?...&action=media       — Pass nonce from step 3; server validates with
+         &nonce={nonce}                          hash_equals, unsets it from session, returns ciphertext
+5. Decrypt locally                            — IV = first 16 bytes of ciphertext; remainder is payload
 6. Write plaintext to disk
 ```
+
+The nonce adds a sequencing constraint (step 3 must precede step 4) but does not change the
+outcome: the attacker performs steps 3 and 4 in order and receives the same key + ciphertext as
+before. The PoC handles this automatically — `fetch_key` returns both `key` and `nonce`, which
+`fetch_encrypted` passes as the `&nonce=` query parameter.
 
 ### Authentication Credential Types
 
@@ -65,7 +76,9 @@ The server uses **AES-256-CBC**:
 - **IV**: prepended as the first 16 bytes of the encrypted file
 - **Padding**: PKCS#7
 
-The `nonce` field in the key response is unused by the decryption process.
+The `nonce` field in the key response must be passed as `&nonce=` when fetching the media endpoint.
+It is validated server-side with `hash_equals` and immediately consumed (unset from session),
+preventing replay. It plays no role in the AES decryption itself.
 
 ---
 
@@ -137,23 +150,38 @@ Done: 48302847 bytes -> south-park.decrypted
 - Any file on the platform is permanently decryptable by anyone who knows the file name and either a file password or download code.
 - The decrypted file is a standard media file (MP4, PDF, etc.) with no residual DRM.
 - The attack requires no browser, no browser extension, and no memory dumping.
-- It is not detectable by the server — the requests are indistinguishable from legitimate viewer requests.
+- It is not detectable by the server — the four requests (page load, auth POST, key fetch, media fetch) are indistinguishable from a legitimate viewer session, including the nonce handshake.
 
 ---
 
 ## Recommended Fixes
 
-1. **Never send the key to the client.** Decrypt server-side and stream the plaintext, or use a
-   proper DRM system (Widevine, FairPlay) that keeps keys in a hardware-backed trusted execution
-   environment.
+### Applied — does not fix the vulnerability
 
-2. **Bind the key to a single-use token.** If client-side decryption must be used, issue a
-   short-lived, single-use key token tied to the session and media item, and expire it after first
-   use.
+**Nonce binding** (`drm_serve.php`): a single-use nonce is now generated at key-fetch time and
+required on the subsequent media fetch. It is validated with `hash_equals` and unset from the
+session immediately, preventing standalone replay of the media endpoint and enforcing sequential
+pairing. This is the right hardening for the endpoints in isolation, but it cannot protect against
+an attacker who simply calls both endpoints in order — which is exactly what the PoC does.
 
-3. **Segment delivery.** Stream small encrypted chunks with per-chunk keys rather than delivering
-   the entire key + ciphertext at once. This limits the window of exposure, though it does not
-   eliminate it.
+### Required to close the vulnerability
+
+1. **Move decryption server-side.** This is the only fix that actually works. The server should
+   decrypt the file and stream the plaintext bytes directly to the client over TLS, never exposing
+   the key or the raw ciphertext. The client receives only the content it is authorised to view,
+   in the session it authenticated, and cannot retain a re-decryptable copy.
+
+2. **If client-side decryption cannot be removed**, adopt a hardware-backed DRM system (Widevine
+   L1/L3, Apple FairPlay) where the Content Decryption Module runs in a trusted execution
+   environment isolated from JavaScript. These systems are explicitly designed for the threat model
+   where the client is untrusted. Rolling a custom AES scheme with a key endpoint is not a
+   substitute.
+
+3. **Segment delivery with short-lived per-segment keys.** As a partial mitigation if neither
+   option above is feasible, stream small time-limited encrypted chunks rather than delivering the
+   full key + full ciphertext in two requests. An attacker who captures one segment does not obtain
+   the full file. This raises the cost of the attack but does not eliminate it — a patient attacker
+   who captures every segment can still reconstruct the plaintext.
 
 None of the JavaScript-based mitigations address the root cause and should not be treated as a
 meaningful security control.
