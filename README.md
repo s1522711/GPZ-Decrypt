@@ -53,7 +53,7 @@ The POST in step 2 accepts two mutually exclusive credential fields depending on
 
 The CSRF scrape and session cookie mechanism is identical in both cases — only the POST field name differs.
 
-Steps 3–6 are performed entirely offline once the session cookie is obtained.
+Steps 5–6 are performed entirely offline once the session cookie is obtained.
 
 ---
 
